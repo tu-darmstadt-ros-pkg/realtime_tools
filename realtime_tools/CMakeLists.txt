@@ -80,6 +80,9 @@ if(BUILD_TESTING)
   ament_add_gmock(realtime_buffer_tests test/realtime_buffer_tests.cpp)
   target_link_libraries(realtime_buffer_tests realtime_tools)
 
+  ament_add_gmock(realtime_double_buffer_tests test/realtime_double_buffer_tests.cpp)
+  target_link_libraries(realtime_double_buffer_tests realtime_tools)
+
   ament_add_gmock(lock_free_queue_tests test/lock_free_queue_tests.cpp)
 
   target_link_libraries(lock_free_queue_tests realtime_tools Boost::boost)
