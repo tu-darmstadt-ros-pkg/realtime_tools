@@ -66,8 +66,7 @@ public:
   std::shared_ptr<GoalHandle> gh_;
 
   explicit RealtimeServerGoalHandle(std::shared_ptr<GoalHandle> & gh)
-  : RealtimeServerGoalHandle(
-      gh, /*preallocated_result, preallocated_feedback,*/ rclcpp::get_logger("realtime_tools"))
+  : RealtimeServerGoalHandle(gh, rclcpp::get_logger("realtime_tools"))
   {
   }
 
@@ -80,6 +79,22 @@ public:
     gh_(gh)
 
   {
+  }
+
+  ~RealtimeServerGoalHandle()
+  {
+    // Make sure all requests are processed before destruction
+    runNonRealtime();
+
+    // If the goal is still active, abort it
+    if (valid()) {
+      try {
+        if (gh_->is_executing() || gh_->is_active()) gh_->abort(req_result_.readFromNonRT());
+      } catch (const rclcpp::exceptions::RCLErrorBase & e) {
+        // Likely invalid state transition
+        RCLCPP_WARN(logger_, "%s", e.formatted_message.c_str());
+      }
+    }
   }
 
   void setAborted(ResultSharedPtr result = nullptr)
@@ -133,7 +148,6 @@ public:
     if (!valid()) {
       return;
     }
-
     try {
       if (
         req_execute_.load(std::memory_order_acquire) && !gh_->is_executing() && gh_->is_active() &&
@@ -144,6 +158,7 @@ public:
         gh_->abort(req_result_.readFromNonRT());
         req_abort_.store(false, std::memory_order_release);
       }
+
       if (req_cancel_.load(std::memory_order_acquire) && gh_->is_active()) {
         gh_->canceled(cancel_result_);
         req_cancel_.store(false, std::memory_order_release);
