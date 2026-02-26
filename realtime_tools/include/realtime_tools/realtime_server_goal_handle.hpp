@@ -48,14 +48,13 @@ class RealtimeServerGoalHandle
 private:
   using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
   using ResultSharedPtr = typename Action::Result::SharedPtr;
-  using FeedbackSharedPtr = typename Action::Feedback::SharedPtr;
+  using FeedbackSharedPtr = typename Action::Feedback::SharedPtr; 
 
   std::atomic<bool> req_abort_;
   std::atomic<bool> req_cancel_;
   std::atomic<bool> req_succeed_;
   std::atomic<bool> req_execute_;
 
-  std::mutex mutex_;
   RealtimeDoubleBuffer<ResultSharedPtr> req_result_;
   // Only result written by non-RT thread
   ResultSharedPtr cancel_result_;
