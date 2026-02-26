@@ -37,37 +37,26 @@
 #include "rclcpp/exceptions.hpp"
 #include "rclcpp/logging.hpp"
 #include "rclcpp_action/server_goal_handle.hpp"
-
-// prio_inherit_mutex uses pthread APIs not available on Windows
-#ifndef _WIN32
-#include "realtime_tools/mutex.hpp"
-#else
-#include <mutex>
-#endif
+#include "realtime_tools/realtime_double_buffer.hpp"
 
 namespace realtime_tools
 {
-#ifndef _WIN32
-using rt_server_goal_handle_mutex = prio_inherit_mutex;
-#else
-using rt_server_goal_handle_mutex = std::mutex;
-#endif
+
 template <class Action>
 class RealtimeServerGoalHandle
 {
 private:
   using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
   using ResultSharedPtr = typename Action::Result::SharedPtr;
-  using FeedbackSharedPtr = typename Action::Feedback::SharedPtr;
+  using FeedbackSharedPtr = typename Action::Feedback::SharedPtr; 
 
   std::atomic<bool> req_abort_;
   std::atomic<bool> req_cancel_;
   std::atomic<bool> req_succeed_;
   std::atomic<bool> req_execute_;
 
-  rt_server_goal_handle_mutex mutex_;
-  ResultSharedPtr req_result_;
-  FeedbackSharedPtr req_feedback_;
+  RealtimeDoubleBuffer<ResultSharedPtr> req_result_;
+  RealtimeDoubleBuffer<FeedbackSharedPtr> req_feedback_;
   rclcpp::Logger logger_;
 
 public:
@@ -103,15 +92,29 @@ public:
     }
   }
 
+  ~RealtimeServerGoalHandle()
+  {
+    // Make sure all requests are processed before destruction
+    runNonRealtime();
+
+    // If the goal is still active, abort it
+    if (valid()) {
+      try {
+        if (gh_->is_executing() || gh_->is_active()) gh_->abort(req_result_.readFromNonRT());
+      } catch (const rclcpp::exceptions::RCLErrorBase & e) {
+        // Likely invalid state transition
+        RCLCPP_WARN(logger_, "%s", e.formatted_message.c_str());
+      }
+    }
+  }
+
   void setAborted(ResultSharedPtr result = nullptr)
   {
     if (
       req_execute_.load(std::memory_order_acquire) &&
       !req_succeed_.load(std::memory_order_acquire) &&
       !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
-
-      req_result_ = result;
+      req_result_.writeFromRT(result);
       req_abort_.store(true, std::memory_order_release);
     }
   }
@@ -122,9 +125,7 @@ public:
       req_execute_.load(std::memory_order_acquire) &&
       !req_succeed_.load(std::memory_order_acquire) &&
       !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
-
-      req_result_ = result;
+      req_result_.writeFromRT(result);
       req_cancel_.store(true, std::memory_order_release);
     }
   }
@@ -135,59 +136,18 @@ public:
       req_execute_.load(std::memory_order_acquire) &&
       !req_succeed_.load(std::memory_order_acquire) &&
       !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
-
-      req_result_ = result;
+      req_result_.writeFromRT(result);
       req_succeed_.store(true, std::memory_order_release);
     }
   }
 
-  /**
-   * @brief Set feedback to be published by runNonRealtime().
-   *
-   * This method uses a non-blocking lock acquisition with try_to_lock() and is safe
-   * to call from real-time context without causing thread blocking or priority inversion.
-   * If the lock cannot be acquired (because runNonRealtime() is holding it), the update
-   * is silently skipped to avoid blocking the real-time thread.
-   *
-   * The feedback pointer is stored and the non-RT thread will publish it on the next
-   * runNonRealtime() call, provided the goal handle is in executing state.
-   *
-   * @param feedback Shared pointer to feedback message. Can be nullptr to clear pending
-   *        feedback. If a valid pointer is provided, the caller must ensure the feedback
-   *        object remains valid until runNonRealtime() processes it. Using a
-   *        preallocated feedback message (stored in preallocated_feedback_) is
-   *        recommended to avoid dynamic allocations in the real-time thread.
-   *
-   * @return true if the lock was acquired and feedback was successfully set,
-   *         false if the lock could not be acquired (feedback update was dropped).
-   *
-   * @note If the mutex lock cannot be acquired, the feedback update is dropped without
-   *       notification. This is intentional to preserve real-time guarantees. Check the
-   *       return value if you need to know whether the update succeeded.
-   *
-   * @note Feedback is only published if the goal is currently executing. If feedback
-   *       is set after the goal transitions out of executing state, it will be discarded.
-   *
-   * @see runNonRealtime() for the counterpart that publishes the feedback.
-   * @see preallocated_feedback_ for recommended pre-allocated feedback usage.
-   */
-  bool setFeedback(FeedbackSharedPtr feedback = nullptr)
-  {
-    std::unique_lock<rt_server_goal_handle_mutex> lock(mutex_, std::try_to_lock);
-    if (lock.owns_lock()) {
-      req_feedback_ = feedback;
-      return true;
-    }
-    return false;
-  }
+  void setFeedback(FeedbackSharedPtr feedback = nullptr) { req_feedback_.writeFromRT(feedback); }
 
   void execute()
   {
     if (
       !req_succeed_.load(std::memory_order_acquire) &&
       !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
       req_execute_.store(true, std::memory_order_release);
     }
   }
@@ -199,9 +159,6 @@ public:
     if (!valid()) {
       return;
     }
-
-    std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
-
     try {
       if (
         req_execute_.load(std::memory_order_acquire) && !gh_->is_executing() && gh_->is_active() &&
@@ -209,19 +166,21 @@ public:
         gh_->execute();
       }
       if (req_abort_.load(std::memory_order_acquire) && gh_->is_executing()) {
-        gh_->abort(req_result_);
+        gh_->abort(req_result_.readFromNonRT());
         req_abort_.store(false, std::memory_order_release);
       }
+
       if (req_cancel_.load(std::memory_order_acquire) && gh_->is_active()) {
-        gh_->canceled(req_result_);
+        gh_->canceled(req_result_.readFromNonRT());
         req_cancel_.store(false, std::memory_order_release);
       }
       if (req_succeed_.load(std::memory_order_acquire) && !gh_->is_canceling()) {
-        gh_->succeed(req_result_);
+        gh_->succeed(req_result_.readFromNonRT());
         req_succeed_.store(false, std::memory_order_release);
       }
-      if (req_feedback_ && gh_->is_executing()) {
-        gh_->publish_feedback(req_feedback_);
+      auto feedback = req_feedback_.readFromNonRT();
+      if (feedback && gh_->is_executing()) {
+        gh_->publish_feedback(feedback);
       }
     } catch (const rclcpp::exceptions::RCLErrorBase & e) {
       // Likely invalid state transition
