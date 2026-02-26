@@ -56,28 +56,40 @@ private:
   std::atomic<bool> req_execute_;
 
   RealtimeDoubleBuffer<ResultSharedPtr> req_result_;
-  // Only result written by non-RT thread
-  ResultSharedPtr cancel_result_;
   RealtimeDoubleBuffer<FeedbackSharedPtr> req_feedback_;
   rclcpp::Logger logger_;
 
 public:
   std::shared_ptr<GoalHandle> gh_;
+  ResultSharedPtr preallocated_result_;      // Preallocated so it can be used in realtime
+  FeedbackSharedPtr preallocated_feedback_;  // Preallocated so it can be used in realtime
 
-  explicit RealtimeServerGoalHandle(std::shared_ptr<GoalHandle> & gh)
-  : RealtimeServerGoalHandle(gh, rclcpp::get_logger("realtime_tools"))
+  explicit RealtimeServerGoalHandle(
+    std::shared_ptr<GoalHandle> & gh, const ResultSharedPtr & preallocated_result = nullptr,
+    const FeedbackSharedPtr & preallocated_feedback = nullptr)
+  : RealtimeServerGoalHandle(
+      gh, preallocated_result, preallocated_feedback, rclcpp::get_logger("realtime_tools"))
   {
   }
 
-  RealtimeServerGoalHandle(std::shared_ptr<GoalHandle> & gh, rclcpp::Logger logger)
+  RealtimeServerGoalHandle(
+    std::shared_ptr<GoalHandle> & gh, const ResultSharedPtr & preallocated_result,
+    const FeedbackSharedPtr & preallocated_feedback, rclcpp::Logger logger)
   : req_abort_(false),
     req_cancel_(false),
     req_succeed_(false),
     req_execute_(false),
     logger_(logger),
-    gh_(gh)
-
+    gh_(gh),
+    preallocated_result_(preallocated_result),
+    preallocated_feedback_(preallocated_feedback)
   {
+    if (!preallocated_result_) {
+      preallocated_result_.reset(new typename Action::Result);
+    }
+    if (!preallocated_feedback_) {
+      preallocated_feedback_.reset(new typename Action::Feedback);
+    }
   }
 
   ~RealtimeServerGoalHandle()
@@ -113,7 +125,7 @@ public:
       req_execute_.load(std::memory_order_acquire) &&
       !req_succeed_.load(std::memory_order_acquire) &&
       !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      cancel_result_ = result;
+      req_result_.writeFromRT(result);
       req_cancel_.store(true, std::memory_order_release);
     }
   }
@@ -159,15 +171,16 @@ public:
       }
 
       if (req_cancel_.load(std::memory_order_acquire) && gh_->is_active()) {
-        gh_->canceled(cancel_result_);
+        gh_->canceled(req_result_.readFromNonRT());
         req_cancel_.store(false, std::memory_order_release);
       }
       if (req_succeed_.load(std::memory_order_acquire) && !gh_->is_canceling()) {
         gh_->succeed(req_result_.readFromNonRT());
         req_succeed_.store(false, std::memory_order_release);
       }
-      if (req_feedback_.readFromNonRT() && gh_->is_executing()) {
-        gh_->publish_feedback(req_feedback_.readFromNonRT());
+      auto feedback = req_feedback_.readFromNonRT();
+      if (feedback && gh_->is_executing()) {
+        gh_->publish_feedback(feedback);
       }
     } catch (const rclcpp::exceptions::RCLErrorBase & e) {
       // Likely invalid state transition
