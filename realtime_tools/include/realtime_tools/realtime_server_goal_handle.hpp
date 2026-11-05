@@ -230,7 +230,9 @@ public:
         !gh_->is_canceling()) {
         gh_->execute();
       }
-      if (req_abort_.load(std::memory_order_acquire) && gh_->is_executing()) {
+      if (
+        req_abort_.load(std::memory_order_acquire) &&
+        (gh_->is_executing() || gh_->is_canceling())) {
         gh_->abort(req_result_);
         req_abort_.store(false, std::memory_order_release);
       }
@@ -238,7 +240,9 @@ public:
         gh_->canceled(req_result_);
         req_cancel_.store(false, std::memory_order_release);
       }
-      if (req_succeed_.load(std::memory_order_acquire) && !gh_->is_canceling()) {
+      if (
+        req_succeed_.load(std::memory_order_acquire) &&
+        (gh_->is_executing() || gh_->is_canceling())) {
         gh_->succeed(req_result_);
         req_succeed_.store(false, std::memory_order_release);
       }
