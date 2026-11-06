@@ -385,6 +385,66 @@ TEST(RealtimeServerGoalHandle, set_aborted_without_result_sends_preallocated_res
   rclcpp::shutdown();
 }
 
+// rclcpp_action aborts a goal whose last handle is dropped before it finished
+TEST(RealtimeServerGoalHandle, destroy_while_executing_without_result)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("destroy_without_result");
+  ActionServerCallbacks callbacks;
+  ActionClientCallbacks client_callbacks;
+  const std::string server_name("~/client/destroy_without_result");
+  auto as = make_server(node, server_name, callbacks);
+
+  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
+  auto client_handle = send_goal(node, client, server_name, client_callbacks);
+  ASSERT_NE(nullptr, client_handle.get());
+
+  ASSERT_TRUE(callbacks.wait_for_handle(node));
+  {
+    RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks.handle_);
+    rt_handle.execute();
+    rt_handle.runNonRealtime();
+    callbacks.handle_.reset();
+  }
+
+  auto wrapped_result = wait_for_result(node, client_handle, client);
+  ASSERT_NE(nullptr, wrapped_result.get());
+  EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::ABORTED);
+  rclcpp::shutdown();
+}
+
+TEST(RealtimeServerGoalHandle, destroy_with_pending_result_sends_it)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("destroy_with_pending_result");
+  ActionServerCallbacks callbacks;
+  ActionClientCallbacks client_callbacks;
+  const std::string server_name("~/client/destroy_with_pending_result");
+  auto as = make_server(node, server_name, callbacks);
+
+  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
+  auto client_handle = send_goal(node, client, server_name, client_callbacks);
+  ASSERT_NE(nullptr, client_handle.get());
+
+  ASSERT_TRUE(callbacks.wait_for_handle(node));
+  {
+    RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks.handle_);
+    rt_handle.execute();
+    rt_handle.runNonRealtime();
+    auto result = std::make_shared<Fibonacci::Result>();
+    result->sequence = {1, 1, 2, 3, 5};
+    rt_handle.setSucceeded(result);
+    callbacks.handle_.reset();
+  }
+
+  auto wrapped_result = wait_for_result(node, client_handle, client);
+  ASSERT_NE(nullptr, wrapped_result.get());
+  EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(nullptr, wrapped_result->result.get());
+  EXPECT_EQ(5, wrapped_result->result->sequence.size());
+  rclcpp::shutdown();
+}
+
 TEST(RealtimeServerGoalHandle, set_result_does_not_wait_for_lock)
 {
   rclcpp::init(0, nullptr);

@@ -38,6 +38,7 @@
 
 #include "rclcpp/exceptions.hpp"
 #include "rclcpp/logging.hpp"
+#include "rclcpp/utilities.hpp"
 #include "rclcpp_action/server_goal_handle.hpp"
 
 // prio_inherit_mutex uses pthread APIs not available on Windows
@@ -98,6 +99,14 @@ public:
     }
     if (!preallocated_feedback_) {
       preallocated_feedback_.reset(new typename Action::Feedback);
+    }
+  }
+
+  ~RealtimeServerGoalHandle()
+  {
+    // Nothing can be sent once the context is shut down
+    if (rclcpp::ok()) {
+      runNonRealtime();
     }
   }
 
