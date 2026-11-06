@@ -207,7 +207,8 @@ public:
         state != State::IDLE && !gh_->is_executing() && gh_->is_active() && !gh_->is_canceling()) {
         gh_->execute();
       }
-      if ((gh_->is_executing() || gh_->is_canceling()) && deliver(state)) {
+      if (is_result(state) && (gh_->is_executing() || gh_->is_canceling())) {
+        deliver(state);
         state_.store(State::DONE, std::memory_order_relaxed);
       }
       if (req_feedback_ && gh_->is_executing()) {
@@ -229,21 +230,21 @@ private:
     }
   }
 
-  bool deliver(State state)
+  static bool is_result(State state)
+  {
+    return state == State::ABORT || state == State::CANCEL || state == State::SUCCEED;
+  }
+
+  // Only for result states, before them a setter may still write req_result_
+  void deliver(State state)
   {
     const ResultSharedPtr & result = req_result_ ? req_result_ : preallocated_result_;
-    switch (state) {
-      case State::ABORT:
-        gh_->abort(result);
-        return true;
-      case State::CANCEL:
-        gh_->canceled(result);
-        return true;
-      case State::SUCCEED:
-        gh_->succeed(result);
-        return true;
-      default:
-        return false;
+    if (state == State::ABORT) {
+      gh_->abort(result);
+    } else if (state == State::CANCEL) {
+      gh_->canceled(result);
+    } else {
+      gh_->succeed(result);
     }
   }
 };

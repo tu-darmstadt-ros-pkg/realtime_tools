@@ -572,6 +572,66 @@ TEST(RealtimeServerGoalHandle, concurrent_results_deliver_one_matching_payload)
   rclcpp::shutdown();
 }
 
+// Like a controller whose goal timer polls while its update loop finishes the goal
+TEST(RealtimeServerGoalHandle, run_non_realtime_concurrent_with_setter)
+{
+  constexpr int GOALS = 10000;
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("concurrent_run_non_realtime");
+  const std::string server_name("~/client/concurrent_run_non_realtime");
+  std::shared_ptr<ServerGoalHandle> server_handle;
+  auto as = rclcpp_action::create_server<Fibonacci>(
+    node, server_name,
+    [](const rclcpp_action::GoalUUID &, std::shared_ptr<const Fibonacci::Goal>) {
+      return rclcpp_action::GoalResponse::ACCEPT_AND_DEFER;
+    },
+    [](std::shared_ptr<ServerGoalHandle>) { return rclcpp_action::CancelResponse::ACCEPT; },
+    [&](std::shared_ptr<ServerGoalHandle> accepted) { server_handle = accepted; });
+  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
+  ASSERT_TRUE(client->wait_for_action_server(ATTEMPTS * DELAY));
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  auto complete = [&](const auto & future) {
+    return executor.spin_until_future_complete(future, ATTEMPTS * DELAY) ==
+           rclcpp::FutureReturnCode::SUCCESS;
+  };
+
+  for (int i = 0; i < GOALS; ++i) {
+    server_handle.reset();
+    auto goal_future = client->async_send_goal(Fibonacci::Goal());
+    ASSERT_TRUE(complete(goal_future));
+    auto client_handle = goal_future.get();
+    ASSERT_NE(nullptr, client_handle.get());
+    ASSERT_NE(nullptr, server_handle.get());
+    RealtimeServerGoalHandle<Fibonacci> rt_handle(server_handle);
+    rt_handle.execute();
+    rt_handle.runNonRealtime();
+
+    auto result = std::make_shared<Fibonacci::Result>();
+    result->sequence = {i};
+    std::atomic<bool> polling = false;
+    std::thread non_rt_thread([&]() {
+      polling.store(true);
+      while (server_handle->is_active()) {
+        rt_handle.runNonRealtime();
+      }
+    });
+    while (!polling.load()) {
+    }
+    rt_handle.setSucceeded(result);
+    non_rt_thread.join();
+
+    auto result_future = client->async_get_result(client_handle);
+    ASSERT_TRUE(complete(result_future));
+    const auto wrapped_result = result_future.get();
+    EXPECT_EQ(wrapped_result.code, rclcpp_action::ResultCode::SUCCEEDED);
+    ASSERT_NE(nullptr, wrapped_result.result.get());
+    ASSERT_EQ(wrapped_result.result->sequence, std::vector<int32_t>{i});
+  }
+  rclcpp::shutdown();
+}
+
 TEST(RealtimeServerGoalHandle, send_feedback)
 {
   rclcpp::init(0, nullptr);
