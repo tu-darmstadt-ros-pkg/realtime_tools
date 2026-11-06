@@ -445,6 +445,40 @@ TEST(RealtimeServerGoalHandle, destroy_with_pending_result_sends_it)
   rclcpp::shutdown();
 }
 
+TEST(RealtimeServerGoalHandle, destroy_survives_failing_result_publish)
+{
+  rclcpp::init(0, nullptr);
+  // Only the node's own context goes down, so the destructor still sends the pending result
+  auto context = std::make_shared<rclcpp::Context>();
+  context->init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>(
+    "destroy_failing_publish", rclcpp::NodeOptions().context(context));
+  rclcpp::ExecutorOptions executor_options;
+  executor_options.context = context;
+  rclcpp::executors::SingleThreadedExecutor executor(executor_options);
+  executor.add_node(node);
+  ActionServerCallbacks callbacks;
+  const std::string server_name("~/client/destroy_failing_publish");
+  auto as = make_server(node, server_name, callbacks);
+  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
+  ASSERT_TRUE(client->wait_for_action_server(ATTEMPTS * DELAY));
+  auto goal_future = client->async_send_goal(Fibonacci::Goal());
+  ASSERT_EQ(
+    rclcpp::FutureReturnCode::SUCCESS,
+    executor.spin_until_future_complete(goal_future, ATTEMPTS * DELAY));
+  ASSERT_NE(nullptr, callbacks.handle_.get());
+
+  {
+    RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks.handle_);
+    rt_handle.execute();
+    rt_handle.runNonRealtime();
+    rt_handle.setSucceeded();
+    context->shutdown("publishing the result fails from now on");
+  }
+  EXPECT_FALSE(callbacks.handle_->is_active());
+  rclcpp::shutdown();
+}
+
 TEST(RealtimeServerGoalHandle, set_result_does_not_wait_for_lock)
 {
   rclcpp::init(0, nullptr);

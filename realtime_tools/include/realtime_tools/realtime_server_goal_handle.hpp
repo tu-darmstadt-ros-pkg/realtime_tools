@@ -33,6 +33,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <utility>
 
@@ -105,8 +106,14 @@ public:
   ~RealtimeServerGoalHandle()
   {
     // Nothing can be sent once the context is shut down
-    if (rclcpp::ok()) {
+    if (!rclcpp::ok()) {
+      return;
+    }
+    // Throwing from a destructor would terminate the process
+    try {
       runNonRealtime();
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(logger_, "Failed to send the pending goal result: %s", e.what());
     }
   }
 
