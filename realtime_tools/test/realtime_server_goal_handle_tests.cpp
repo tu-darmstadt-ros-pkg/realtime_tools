@@ -355,6 +355,133 @@ TEST(RealtimeServerGoalHandle, set_succeeded_or_aborted_while_canceling)
   rclcpp::shutdown();
 }
 
+TEST(RealtimeServerGoalHandle, set_result_does_not_wait_for_lock)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("set_result_does_not_wait_for_lock");
+  ActionServerCallbacks callbacks;
+  ActionClientCallbacks client_callbacks;
+  const std::string server_name("~/client/set_result_does_not_wait_for_lock");
+  auto as = make_server(node, server_name, callbacks);
+
+  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
+  auto client_handle = send_goal(node, client, server_name, client_callbacks);
+  ASSERT_NE(nullptr, client_handle.get());
+
+  ASSERT_TRUE(callbacks.wait_for_handle(node));
+  RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks.handle_);
+  rt_handle.execute();
+  rt_handle.runNonRealtime();
+
+  std::atomic<bool> lock_held = false;
+  std::atomic<bool> set_returned = false;
+  bool set_returned_while_locked = false;
+  std::thread lock_thread([&]() {
+    rt_handle.trySetFeedback([&](Fibonacci::Feedback &) {
+      lock_held.store(true);
+      const auto deadline = std::chrono::steady_clock::now() + ATTEMPTS * DELAY;
+      while (!set_returned.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+      }
+      set_returned_while_locked = set_returned.load();
+    });
+  });
+  while (!lock_held.load()) {
+    std::this_thread::yield();
+  }
+  auto result = std::make_shared<Fibonacci::Result>();
+  result->sequence = {1, 1, 2, 3, 5};
+  rt_handle.setSucceeded(result);
+  set_returned.store(true);
+  lock_thread.join();
+  EXPECT_TRUE(set_returned_while_locked);
+
+  rt_handle.runNonRealtime();
+  auto wrapped_result = wait_for_result(node, client_handle, client);
+  ASSERT_NE(nullptr, wrapped_result.get());
+  EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(nullptr, wrapped_result->result.get());
+  EXPECT_EQ(5, wrapped_result->result->sequence.size());
+  rclcpp::shutdown();
+}
+
+// Like a controller whose update loop finishes a goal while its cancel callback cancels it
+TEST(RealtimeServerGoalHandle, concurrent_results_deliver_one_matching_payload)
+{
+  constexpr int GOALS = 2000;
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("concurrent_results");
+  const std::string server_name("~/client/concurrent_results");
+  std::shared_ptr<ServerGoalHandle> server_handle;
+  auto as = rclcpp_action::create_server<Fibonacci>(
+    node, server_name,
+    [](const rclcpp_action::GoalUUID &, std::shared_ptr<const Fibonacci::Goal>) {
+      return rclcpp_action::GoalResponse::ACCEPT_AND_DEFER;
+    },
+    [](std::shared_ptr<ServerGoalHandle>) { return rclcpp_action::CancelResponse::ACCEPT; },
+    [&](std::shared_ptr<ServerGoalHandle> accepted) { server_handle = accepted; });
+  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
+  ASSERT_TRUE(client->wait_for_action_server(ATTEMPTS * DELAY));
+
+  // Only the setters run on other threads, so TSan sees no races inside uninstrumented rclcpp
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  auto complete = [&](const auto & future) {
+    return executor.spin_until_future_complete(future, ATTEMPTS * DELAY) ==
+           rclcpp::FutureReturnCode::SUCCESS;
+  };
+
+  for (int i = 0; i < GOALS; ++i) {
+    server_handle.reset();
+    auto goal_future = client->async_send_goal(Fibonacci::Goal());
+    ASSERT_TRUE(complete(goal_future));
+    auto client_handle = goal_future.get();
+    ASSERT_NE(nullptr, client_handle.get());
+    ASSERT_NE(nullptr, server_handle.get());
+    RealtimeServerGoalHandle<Fibonacci> rt_handle(server_handle);
+    rt_handle.execute();
+    rt_handle.runNonRealtime();
+    ASSERT_TRUE(complete(client->async_cancel_goal(client_handle)));
+    ASSERT_TRUE(server_handle->is_canceling());
+
+    auto succeeded = std::make_shared<Fibonacci::Result>();
+    succeeded->sequence = {static_cast<int32_t>(rclcpp_action::ResultCode::SUCCEEDED)};
+    auto canceled = std::make_shared<Fibonacci::Result>();
+    canceled->sequence = {static_cast<int32_t>(rclcpp_action::ResultCode::CANCELED)};
+    std::atomic<int> started = 0;
+    std::atomic<bool> go = false;
+    auto start_together = [&]() {
+      started.fetch_add(1);
+      while (!go.load()) {
+      }
+    };
+    std::thread rt_thread([&]() {
+      start_together();
+      rt_handle.setSucceeded(succeeded);
+    });
+    std::thread cancel_thread([&]() {
+      start_together();
+      rt_handle.setCanceled(canceled);
+    });
+    while (started.load() < 2) {
+    }
+    go.store(true);
+    rt_thread.join();
+    cancel_thread.join();
+    rt_handle.runNonRealtime();
+
+    auto result_future = client->async_get_result(client_handle);
+    ASSERT_TRUE(complete(result_future));
+    const auto wrapped_result = result_future.get();
+    ASSERT_NE(nullptr, wrapped_result.result.get());
+    ASSERT_EQ(
+      wrapped_result.result->sequence,
+      std::vector<int32_t>{static_cast<int32_t>(wrapped_result.code)})
+      << "goal " << i;
+  }
+  rclcpp::shutdown();
+}
+
 TEST(RealtimeServerGoalHandle, send_feedback)
 {
   rclcpp::init(0, nullptr);

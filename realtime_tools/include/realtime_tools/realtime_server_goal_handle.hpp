@@ -32,7 +32,9 @@
 #define REALTIME_TOOLS__REALTIME_SERVER_GOAL_HANDLE_HPP_
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <utility>
 
 #include "rclcpp/exceptions.hpp"
 #include "rclcpp/logging.hpp"
@@ -60,10 +62,9 @@ private:
   using ResultSharedPtr = typename Action::Result::SharedPtr;
   using FeedbackSharedPtr = typename Action::Feedback::SharedPtr;
 
-  std::atomic<bool> req_abort_;
-  std::atomic<bool> req_cancel_;
-  std::atomic<bool> req_succeed_;
-  std::atomic<bool> req_execute_;
+  enum class State : uint8_t { IDLE, EXECUTE, WRITING, ABORT, CANCEL, SUCCEED, DONE };
+  static_assert(std::atomic<State>::is_always_lock_free);
+  std::atomic<State> state_;
 
   rt_server_goal_handle_mutex mutex_;
   ResultSharedPtr req_result_;
@@ -86,10 +87,7 @@ public:
   RealtimeServerGoalHandle(
     std::shared_ptr<GoalHandle> & gh, const ResultSharedPtr & preallocated_result,
     const FeedbackSharedPtr & preallocated_feedback, rclcpp::Logger logger)
-  : req_abort_(false),
-    req_cancel_(false),
-    req_succeed_(false),
-    req_execute_(false),
+  : state_(State::IDLE),
     logger_(logger),
     gh_(gh),
     preallocated_result_(preallocated_result),
@@ -103,43 +101,17 @@ public:
     }
   }
 
-  void setAborted(ResultSharedPtr result = nullptr)
-  {
-    if (
-      req_execute_.load(std::memory_order_acquire) &&
-      !req_succeed_.load(std::memory_order_acquire) &&
-      !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
+  /**
+   * The setters are lock free and safe to call from any thread. After execute(), only the first
+   * of setAborted(), setCanceled() and setSucceeded() takes effect.
+   */
+  void setAborted(ResultSharedPtr result = nullptr) { request(State::ABORT, std::move(result)); }
 
-      req_result_ = result;
-      req_abort_.store(true, std::memory_order_release);
-    }
-  }
-
-  void setCanceled(ResultSharedPtr result = nullptr)
-  {
-    if (
-      req_execute_.load(std::memory_order_acquire) &&
-      !req_succeed_.load(std::memory_order_acquire) &&
-      !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
-
-      req_result_ = result;
-      req_cancel_.store(true, std::memory_order_release);
-    }
-  }
+  void setCanceled(ResultSharedPtr result = nullptr) { request(State::CANCEL, std::move(result)); }
 
   void setSucceeded(ResultSharedPtr result = nullptr)
   {
-    if (
-      req_execute_.load(std::memory_order_acquire) &&
-      !req_succeed_.load(std::memory_order_acquire) &&
-      !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
-
-      req_result_ = result;
-      req_succeed_.store(true, std::memory_order_release);
-    }
+    request(State::SUCCEED, std::move(result));
   }
 
   /**
@@ -206,12 +178,8 @@ public:
 
   void execute()
   {
-    if (
-      !req_succeed_.load(std::memory_order_acquire) &&
-      !req_abort_.load(std::memory_order_acquire) && !req_cancel_.load(std::memory_order_acquire)) {
-      std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
-      req_execute_.store(true, std::memory_order_release);
-    }
+    State expected = State::IDLE;
+    state_.compare_exchange_strong(expected, State::EXECUTE, std::memory_order_relaxed);
   }
 
   bool valid() { return nullptr != gh_.get(); }
@@ -223,28 +191,15 @@ public:
     }
 
     std::lock_guard<rt_server_goal_handle_mutex> guard(mutex_);
+    const State state = state_.load(std::memory_order_acquire);
 
     try {
       if (
-        req_execute_.load(std::memory_order_acquire) && !gh_->is_executing() && gh_->is_active() &&
-        !gh_->is_canceling()) {
+        state != State::IDLE && !gh_->is_executing() && gh_->is_active() && !gh_->is_canceling()) {
         gh_->execute();
       }
-      if (
-        req_abort_.load(std::memory_order_acquire) &&
-        (gh_->is_executing() || gh_->is_canceling())) {
-        gh_->abort(req_result_);
-        req_abort_.store(false, std::memory_order_release);
-      }
-      if (req_cancel_.load(std::memory_order_acquire) && gh_->is_active()) {
-        gh_->canceled(req_result_);
-        req_cancel_.store(false, std::memory_order_release);
-      }
-      if (
-        req_succeed_.load(std::memory_order_acquire) &&
-        (gh_->is_executing() || gh_->is_canceling())) {
-        gh_->succeed(req_result_);
-        req_succeed_.store(false, std::memory_order_release);
+      if ((gh_->is_executing() || gh_->is_canceling()) && deliver(state)) {
+        state_.store(State::DONE, std::memory_order_relaxed);
       }
       if (req_feedback_ && gh_->is_executing()) {
         gh_->publish_feedback(req_feedback_);
@@ -252,6 +207,33 @@ public:
     } catch (const rclcpp::exceptions::RCLErrorBase & e) {
       // Likely invalid state transition
       RCLCPP_WARN(logger_, "%s", e.formatted_message.c_str());
+    }
+  }
+
+private:
+  void request(State requested, ResultSharedPtr result)
+  {
+    State expected = State::EXECUTE;
+    if (state_.compare_exchange_strong(expected, State::WRITING, std::memory_order_acquire)) {
+      req_result_ = std::move(result);
+      state_.store(requested, std::memory_order_release);
+    }
+  }
+
+  bool deliver(State state)
+  {
+    switch (state) {
+      case State::ABORT:
+        gh_->abort(req_result_);
+        return true;
+      case State::CANCEL:
+        gh_->canceled(req_result_);
+        return true;
+      case State::SUCCEED:
+        gh_->succeed(req_result_);
+        return true;
+      default:
+        return false;
     }
   }
 };
