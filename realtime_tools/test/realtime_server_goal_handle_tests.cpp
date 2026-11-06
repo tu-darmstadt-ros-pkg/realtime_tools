@@ -355,6 +355,36 @@ TEST(RealtimeServerGoalHandle, set_succeeded_or_aborted_while_canceling)
   rclcpp::shutdown();
 }
 
+TEST(RealtimeServerGoalHandle, set_aborted_without_result_sends_preallocated_result)
+{
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("set_aborted_without_result");
+  ActionServerCallbacks callbacks;
+  ActionClientCallbacks client_callbacks;
+  const std::string server_name("~/client/set_aborted_without_result");
+  auto as = make_server(node, server_name, callbacks);
+
+  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
+  auto client_handle = send_goal(node, client, server_name, client_callbacks);
+  ASSERT_NE(nullptr, client_handle.get());
+
+  ASSERT_TRUE(callbacks.wait_for_handle(node));
+  auto preallocated_result = std::make_shared<Fibonacci::Result>();
+  preallocated_result->sequence = {1, 1, 2};
+  RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks.handle_, preallocated_result);
+  rt_handle.execute();
+  rt_handle.runNonRealtime();
+  rt_handle.setAborted();
+  rt_handle.runNonRealtime();
+
+  auto wrapped_result = wait_for_result(node, client_handle, client);
+  ASSERT_NE(nullptr, wrapped_result.get());
+  EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::ABORTED);
+  ASSERT_NE(nullptr, wrapped_result->result.get());
+  EXPECT_THAT(wrapped_result->result->sequence, testing::ElementsAre(1, 1, 2));
+  rclcpp::shutdown();
+}
+
 TEST(RealtimeServerGoalHandle, set_result_does_not_wait_for_lock)
 {
   rclcpp::init(0, nullptr);

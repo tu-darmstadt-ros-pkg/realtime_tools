@@ -222,15 +222,16 @@ private:
 
   bool deliver(State state)
   {
+    const ResultSharedPtr & result = req_result_ ? req_result_ : preallocated_result_;
     switch (state) {
       case State::ABORT:
-        gh_->abort(req_result_);
+        gh_->abort(result);
         return true;
       case State::CANCEL:
-        gh_->canceled(req_result_);
+        gh_->canceled(result);
         return true;
       case State::SUCCEED:
-        gh_->succeed(req_result_);
+        gh_->succeed(result);
         return true;
       default:
         return false;
