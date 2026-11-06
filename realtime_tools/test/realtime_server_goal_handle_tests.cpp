@@ -445,38 +445,63 @@ TEST(RealtimeServerGoalHandle, destroy_with_pending_result_sends_it)
   rclcpp::shutdown();
 }
 
-TEST(RealtimeServerGoalHandle, destroy_survives_failing_result_publish)
+// Only the node's own context goes down, so the goal handle still tries to send the result
+class FailingResultPublish : public ::testing::Test
 {
-  rclcpp::init(0, nullptr);
-  // Only the node's own context goes down, so the destructor still sends the pending result
-  auto context = std::make_shared<rclcpp::Context>();
-  context->init(0, nullptr);
-  auto node = std::make_shared<rclcpp::Node>(
-    "destroy_failing_publish", rclcpp::NodeOptions().context(context));
-  rclcpp::ExecutorOptions executor_options;
-  executor_options.context = context;
-  rclcpp::executors::SingleThreadedExecutor executor(executor_options);
-  executor.add_node(node);
-  ActionServerCallbacks callbacks;
-  const std::string server_name("~/client/destroy_failing_publish");
-  auto as = make_server(node, server_name, callbacks);
-  auto client = rclcpp_action::create_client<Fibonacci>(node, server_name);
-  ASSERT_TRUE(client->wait_for_action_server(ATTEMPTS * DELAY));
-  auto goal_future = client->async_send_goal(Fibonacci::Goal());
-  ASSERT_EQ(
-    rclcpp::FutureReturnCode::SUCCESS,
-    executor.spin_until_future_complete(goal_future, ATTEMPTS * DELAY));
-  ASSERT_NE(nullptr, callbacks.handle_.get());
-
+protected:
+  void SetUp() override
   {
-    RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks.handle_);
+    rclcpp::init(0, nullptr);
+    context_->init(0, nullptr);
+    node_ = std::make_shared<rclcpp::Node>(
+      "failing_result_publish", rclcpp::NodeOptions().context(context_));
+    rclcpp::ExecutorOptions executor_options;
+    executor_options.context = context_;
+    executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>(executor_options);
+    executor_->add_node(node_);
+    const std::string server_name("~/client/failing_result_publish");
+    server_ = make_server(node_, server_name, callbacks_);
+    client_ = rclcpp_action::create_client<Fibonacci>(node_, server_name);
+    ASSERT_TRUE(client_->wait_for_action_server(ATTEMPTS * DELAY));
+    auto goal_future = client_->async_send_goal(Fibonacci::Goal());
+    ASSERT_EQ(
+      rclcpp::FutureReturnCode::SUCCESS,
+      executor_->spin_until_future_complete(goal_future, ATTEMPTS * DELAY));
+    ASSERT_NE(nullptr, callbacks_.handle_.get());
+  }
+
+  void TearDown() override { rclcpp::shutdown(); }
+
+  std::shared_ptr<rclcpp::Context> context_ = std::make_shared<rclcpp::Context>();
+  rclcpp::Node::SharedPtr node_;
+  std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor_;
+  ActionServerCallbacks callbacks_;
+  rclcpp_action::Server<Fibonacci>::SharedPtr server_;
+  rclcpp_action::Client<Fibonacci>::SharedPtr client_;
+};
+
+TEST_F(FailingResultPublish, destroy_survives_it)
+{
+  {
+    RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks_.handle_);
     rt_handle.execute();
     rt_handle.runNonRealtime();
     rt_handle.setSucceeded();
-    context->shutdown("publishing the result fails from now on");
+    context_->shutdown("publishing the result fails from now on");
   }
-  EXPECT_FALSE(callbacks.handle_->is_active());
-  rclcpp::shutdown();
+  EXPECT_FALSE(callbacks_.handle_->is_active());
+}
+
+// An exception escaping a timer callback would take down the executor
+TEST_F(FailingResultPublish, run_non_realtime_does_not_throw)
+{
+  RealtimeServerGoalHandle<Fibonacci> rt_handle(callbacks_.handle_);
+  rt_handle.execute();
+  rt_handle.runNonRealtime();
+  rt_handle.setSucceeded();
+  context_->shutdown("publishing the result fails from now on");
+  EXPECT_NO_THROW(rt_handle.runNonRealtime());
+  EXPECT_FALSE(callbacks_.handle_->is_active());
 }
 
 TEST(RealtimeServerGoalHandle, set_result_does_not_wait_for_lock)

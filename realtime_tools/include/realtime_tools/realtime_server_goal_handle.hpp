@@ -109,12 +109,7 @@ public:
     if (!rclcpp::ok()) {
       return;
     }
-    // Throwing from a destructor would terminate the process
-    try {
-      runNonRealtime();
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(logger_, "Failed to send the pending goal result: %s", e.what());
-    }
+    runNonRealtime();
   }
 
   /**
@@ -224,6 +219,12 @@ public:
     } catch (const rclcpp::exceptions::RCLErrorBase & e) {
       // Likely invalid state transition
       RCLCPP_WARN(logger_, "%s", e.formatted_message.c_str());
+    } catch (const std::exception & e) {
+      // Escaping would take down the executor running this, or terminate from the destructor
+      RCLCPP_ERROR(logger_, "Failed to send the goal result: %s", e.what());
+      if (is_result(state)) {
+        state_.store(State::DONE, std::memory_order_relaxed);
+      }
     }
   }
 
