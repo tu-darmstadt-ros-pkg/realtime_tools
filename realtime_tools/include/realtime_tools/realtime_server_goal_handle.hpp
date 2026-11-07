@@ -56,6 +56,8 @@ using rt_server_goal_handle_mutex = prio_inherit_mutex;
 #else
 using rt_server_goal_handle_mutex = std::mutex;
 #endif
+/// The destructor sends a pending result on the thread that drops the last reference, so drop it
+/// outside the realtime loop.
 template <class Action>
 class RealtimeServerGoalHandle
 {
@@ -75,7 +77,8 @@ private:
 
 public:
   std::shared_ptr<GoalHandle> gh_;
-  ResultSharedPtr preallocated_result_;      // Preallocated so it can be used in realtime
+  // Sent when a setter gets no result, so fill it only while no other thread can call such a setter
+  ResultSharedPtr preallocated_result_;
   FeedbackSharedPtr preallocated_feedback_;  // Preallocated for trySetFeedback()
 
   explicit RealtimeServerGoalHandle(

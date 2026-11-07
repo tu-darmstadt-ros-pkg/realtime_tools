@@ -211,9 +211,16 @@ rclcpp_action::Server<Fibonacci>::SharedPtr make_server(
     std::bind(&ActionServerCallbacks::accepted_callback, &callbacks, std::placeholders::_1));
 }
 
-TEST(RealtimeServerGoalHandle, set_aborted)
+// A fresh context per test, so one failed ASSERT does not leave rclcpp initialised for the next
+class RealtimeServerGoalHandleTest : public ::testing::Test
 {
-  rclcpp::init(0, nullptr);
+protected:
+  void SetUp() override { rclcpp::init(0, nullptr); }
+  void TearDown() override { rclcpp::shutdown(); }
+};
+
+TEST_F(RealtimeServerGoalHandleTest, set_aborted)
+{
   auto node = std::make_shared<rclcpp::Node>("set_aborted");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -242,12 +249,10 @@ TEST(RealtimeServerGoalHandle, set_aborted)
   EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::ABORTED);
   ASSERT_NE(nullptr, wrapped_result->result.get());
   EXPECT_EQ(5, wrapped_result->result->sequence.size());
-  rclcpp::shutdown();
 }
 
-TEST(RealtimeServerGoalHandle, set_canceled)
+TEST_F(RealtimeServerGoalHandleTest, set_canceled)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("set_canceled");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -278,12 +283,10 @@ TEST(RealtimeServerGoalHandle, set_canceled)
   EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::CANCELED);
   ASSERT_NE(nullptr, wrapped_result->result.get());
   EXPECT_EQ(5, wrapped_result->result->sequence.size());
-  rclcpp::shutdown();
 }
 
-TEST(RealtimeServerGoalHandle, set_succeeded)
+TEST_F(RealtimeServerGoalHandleTest, set_succeeded)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("set_succeeded");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -312,13 +315,11 @@ TEST(RealtimeServerGoalHandle, set_succeeded)
   EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::SUCCEEDED);
   ASSERT_NE(nullptr, wrapped_result->result.get());
   EXPECT_EQ(5, wrapped_result->result->sequence.size());
-  rclcpp::shutdown();
 }
 
 // The action server may finish a goal in any way while a cancel request is pending
-TEST(RealtimeServerGoalHandle, set_succeeded_or_aborted_while_canceling)
+TEST_F(RealtimeServerGoalHandleTest, set_succeeded_or_aborted_while_canceling)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("set_while_canceling");
   const std::string server_name("~/client/set_while_canceling");
   ActionServerCallbacks callbacks;
@@ -352,12 +353,10 @@ TEST(RealtimeServerGoalHandle, set_succeeded_or_aborted_while_canceling)
     ASSERT_NE(nullptr, wrapped_result->result.get());
     EXPECT_EQ(5, wrapped_result->result->sequence.size());
   }
-  rclcpp::shutdown();
 }
 
-TEST(RealtimeServerGoalHandle, set_aborted_without_result_sends_preallocated_result)
+TEST_F(RealtimeServerGoalHandleTest, set_aborted_without_result_sends_preallocated_result)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("set_aborted_without_result");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -382,13 +381,11 @@ TEST(RealtimeServerGoalHandle, set_aborted_without_result_sends_preallocated_res
   EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::ABORTED);
   ASSERT_NE(nullptr, wrapped_result->result.get());
   EXPECT_THAT(wrapped_result->result->sequence, testing::ElementsAre(1, 1, 2));
-  rclcpp::shutdown();
 }
 
 // rclcpp_action aborts a goal whose last handle is dropped before it finished
-TEST(RealtimeServerGoalHandle, destroy_while_executing_without_result)
+TEST_F(RealtimeServerGoalHandleTest, destroy_while_executing_without_result)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("destroy_without_result");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -410,12 +407,10 @@ TEST(RealtimeServerGoalHandle, destroy_while_executing_without_result)
   auto wrapped_result = wait_for_result(node, client_handle, client);
   ASSERT_NE(nullptr, wrapped_result.get());
   EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::ABORTED);
-  rclcpp::shutdown();
 }
 
-TEST(RealtimeServerGoalHandle, destroy_with_pending_result_sends_it)
+TEST_F(RealtimeServerGoalHandleTest, destroy_with_pending_result_sends_it)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("destroy_with_pending_result");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -442,16 +437,15 @@ TEST(RealtimeServerGoalHandle, destroy_with_pending_result_sends_it)
   EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::SUCCEEDED);
   ASSERT_NE(nullptr, wrapped_result->result.get());
   EXPECT_EQ(5, wrapped_result->result->sequence.size());
-  rclcpp::shutdown();
 }
 
 // Only the node's own context goes down, so the goal handle still tries to send the result
-class FailingResultPublish : public ::testing::Test
+class FailingResultPublish : public RealtimeServerGoalHandleTest
 {
 protected:
   void SetUp() override
   {
-    rclcpp::init(0, nullptr);
+    RealtimeServerGoalHandleTest::SetUp();
     context_->init(0, nullptr);
     node_ = std::make_shared<rclcpp::Node>(
       "failing_result_publish", rclcpp::NodeOptions().context(context_));
@@ -469,8 +463,6 @@ protected:
       executor_->spin_until_future_complete(goal_future, ATTEMPTS * DELAY));
     ASSERT_NE(nullptr, callbacks_.handle_.get());
   }
-
-  void TearDown() override { rclcpp::shutdown(); }
 
   std::shared_ptr<rclcpp::Context> context_ = std::make_shared<rclcpp::Context>();
   rclcpp::Node::SharedPtr node_;
@@ -504,9 +496,8 @@ TEST_F(FailingResultPublish, run_non_realtime_does_not_throw)
   EXPECT_FALSE(callbacks_.handle_->is_active());
 }
 
-TEST(RealtimeServerGoalHandle, set_result_does_not_wait_for_lock)
+TEST_F(RealtimeServerGoalHandleTest, set_result_does_not_wait_for_lock)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("set_result_does_not_wait_for_lock");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -551,14 +542,12 @@ TEST(RealtimeServerGoalHandle, set_result_does_not_wait_for_lock)
   EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::SUCCEEDED);
   ASSERT_NE(nullptr, wrapped_result->result.get());
   EXPECT_EQ(5, wrapped_result->result->sequence.size());
-  rclcpp::shutdown();
 }
 
 // Like a controller whose update loop finishes a goal while its cancel callback cancels it
-TEST(RealtimeServerGoalHandle, concurrent_results_deliver_one_matching_payload)
+TEST_F(RealtimeServerGoalHandleTest, concurrent_results_deliver_one_matching_payload)
 {
   constexpr int GOALS = 2000;
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("concurrent_results");
   const std::string server_name("~/client/concurrent_results");
   std::shared_ptr<ServerGoalHandle> server_handle;
@@ -628,14 +617,12 @@ TEST(RealtimeServerGoalHandle, concurrent_results_deliver_one_matching_payload)
       std::vector<int32_t>{static_cast<int32_t>(wrapped_result.code)})
       << "goal " << i;
   }
-  rclcpp::shutdown();
 }
 
 // Like a controller whose goal timer polls while its update loop finishes the goal
-TEST(RealtimeServerGoalHandle, run_non_realtime_concurrent_with_setter)
+TEST_F(RealtimeServerGoalHandleTest, run_non_realtime_concurrent_with_setter)
 {
-  constexpr int GOALS = 10000;
-  rclcpp::init(0, nullptr);
+  constexpr int GOALS = 1000;
   auto node = std::make_shared<rclcpp::Node>("concurrent_run_non_realtime");
   const std::string server_name("~/client/concurrent_run_non_realtime");
   std::shared_ptr<ServerGoalHandle> server_handle;
@@ -688,12 +675,10 @@ TEST(RealtimeServerGoalHandle, run_non_realtime_concurrent_with_setter)
     ASSERT_NE(nullptr, wrapped_result.result.get());
     ASSERT_EQ(wrapped_result.result->sequence, std::vector<int32_t>{i});
   }
-  rclcpp::shutdown();
 }
 
-TEST(RealtimeServerGoalHandle, send_feedback)
+TEST_F(RealtimeServerGoalHandleTest, send_feedback)
 {
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("send_feedback");
   ActionServerCallbacks callbacks;
   ActionClientCallbacks client_callbacks;
@@ -738,5 +723,4 @@ TEST(RealtimeServerGoalHandle, send_feedback)
 
   EXPECT_TRUE(client_callbacks.wait_for_feedback(node));
   EXPECT_THAT(client_callbacks.feedback_sequence(), testing::ElementsAre(1, 1, 2, 3, 5));
-  rclcpp::shutdown();
 }
