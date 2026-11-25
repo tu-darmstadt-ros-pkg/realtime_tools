@@ -383,7 +383,8 @@ TEST_F(RealtimeServerGoalHandleTest, set_aborted_without_result_sends_preallocat
   EXPECT_THAT(wrapped_result->result->sequence, testing::ElementsAre(1, 1, 2));
 }
 
-// rclcpp_action aborts a goal whose last handle is dropped before it finished
+// rclcpp_action ends a goal whose last handle is dropped before it finished, jazzy and kilted
+// cancel it and newer distros abort it
 TEST_F(RealtimeServerGoalHandleTest, destroy_while_executing_without_result)
 {
   auto node = std::make_shared<rclcpp::Node>("destroy_without_result");
@@ -406,7 +407,9 @@ TEST_F(RealtimeServerGoalHandleTest, destroy_while_executing_without_result)
 
   auto wrapped_result = wait_for_result(node, client_handle, client);
   ASSERT_NE(nullptr, wrapped_result.get());
-  EXPECT_EQ(wrapped_result->code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_THAT(
+    wrapped_result->code,
+    testing::AnyOf(rclcpp_action::ResultCode::ABORTED, rclcpp_action::ResultCode::CANCELED));
 }
 
 TEST_F(RealtimeServerGoalHandleTest, destroy_with_pending_result_sends_it)
